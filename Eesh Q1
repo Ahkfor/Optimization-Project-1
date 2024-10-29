@@ -25,25 +25,23 @@ population = population[['zip_code', '-5', '5-9', '10-14']]
 
 population.rename(columns={'-5': '0-5'}, inplace=True)
 
+# TA formula
 population['0-12'] = np.floor((3 / 5)*population['10-14'] + population['0-5'] + population['5-9'])
 
 # Combine infant, toddler, and preschool capacity into age 0-5 capacity column (TA's formulas)
 existing['0-5 capacity'] = np.floor(
     existing['infant_capacity'] + existing['toddler_capacity'] + existing['preschool_capacity'] + (5 / 12) * existing[
         'children_capacity'])
-existing['5-12 capacity'] = np.floor(7/12 * existing['children_capacity'])
-existing['0-12 capacity'] = existing['0-5 capacity'] + existing['5-12 capacity']
 
+# Drop facilities with total capacity of 0, (there were one or two)
 existing = existing[existing['total_capacity'] != 0]
-
-master_zips = sorted(list(income['zip_code']))
 
 master_df = employ
 master_df['income'] = income['average income']
 master_df['0-5 pop'] = population['0-5']
 master_df['0-12 pop'] = population['0-12']
 
-master_df['is_hd'] = np.where((master_df['employment rate'] >= 0.60) & (master_df['income'] <= 60000), 1, 0)
+master_df['is_hd'] = np.where((master_df['employment rate'] >= 0.60) | (master_df['income'] <= 60000), 1, 0)
 
 m = Model('model')
 
@@ -78,7 +76,7 @@ for i in range(len(master_df)):
         expans512 = [m.addVar(vtype=GRB.INTEGER, lb=0, name=f'exp512_{int(zip1)}_{facility["facility_id"]}') for
                     idx, facility in current.iterrows()]
 
-        # Expansion cannot result in more than 500 total slots
+        # Expansion cannot result in more than 500 total slots at each facility
         for j in range(len(expans05)):
             if total_capacities[j] >= 500:
                 m.addConstr(expans05[j] + expans512[j] == 0, name=f'maxslots_{zip1}_{current.iloc[j]["facility_id"]}')
@@ -88,20 +86,21 @@ for i in range(len(master_df)):
 
         new_totalcapacity_byzip_exp = (xs * 100 + xm * 200 + xl * 400) + quicksum(
             expans05[i] + expans512[i] + total_capacities[i] for i in range(len(expans05)))
+
         new_05capacity_byzip_exp = (xs * 50 + xm * 100 + xl * 200) + quicksum(
             expans05[i] + zerotofive_capacities[i] for i in range(len(expans05)))
 
         # High/low demand constraints
         if row['is_hd'] == 1:
-            m.addConstr(new_totalcapacity_byzip_exp >= 0.5 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
-            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+            m.addConstr(new_totalcapacity_byzip_exp >= (1/2) * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= (2/3) * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
 
         else:
-            m.addConstr(new_totalcapacity_byzip_exp >= 0.333 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
-            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+            m.addConstr(new_totalcapacity_byzip_exp >= (1/3) * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= (2/3) * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
 
         for k in range(len(expans05)):
-
+            # TA's formula
             expans_cost_exp += (20000 + 200 * total_capacities[k]) * ((expans05[k]+expans512[k])/total_capacities[k]) + (100*expans05[k])
 
     # If there are no facilities in that zipcode
@@ -112,12 +111,12 @@ for i in range(len(master_df)):
 
         # High/low demand constraints
         if row['is_hd'] == 1:
-            m.addConstr(new_totalcapacity_byzip_exp >= 0.5 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
-            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+            m.addConstr(new_totalcapacity_byzip_exp >= (1/2) * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= (2/3) * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
 
         else:
-            m.addConstr(new_totalcapacity_byzip_exp >= 0.333 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
-            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+            m.addConstr(new_totalcapacity_byzip_exp >= (1/3) * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= (2/3) * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
 
     master_cost_objective += build_cost_exp + expans_cost_exp
 
@@ -125,4 +124,8 @@ m.setObjective(master_cost_objective, GRB.MINIMIZE)
 
 m.update()
 m.optimize()
+
+opt_vars = [v for v in m.getVars()]
+
+
 
