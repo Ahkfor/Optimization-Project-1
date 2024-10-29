@@ -87,9 +87,9 @@ for i in range(len(master_df)):
                 m.addConstr(expans05[j] + expans512[j] + total_capacities[j] <= max_capacity, name=f'maxslots_{zip1}_{current.iloc[j]["facility_id"]}')
 
         new_totalcapacity_byzip_exp = (xs * 100 + xm * 200 + xl * 400) + quicksum(
-            expans05[i] + expans512[i] for i in range(len(expans05)))
+            expans05[i] + expans512[i] + total_capacities[i] for i in range(len(expans05)))
         new_05capacity_byzip_exp = (xs * 50 + xm * 100 + xl * 200) + quicksum(
-            expans05[i] for i in range(len(expans05)))
+            expans05[i] + zerotofive_capacities[i] for i in range(len(expans05)))
 
         # High/low demand constraints
         if row['is_hd'] == 1:
