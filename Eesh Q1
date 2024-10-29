@@ -1,0 +1,128 @@
+from gurobipy import Model, GRB, quicksum
+import pandas as pd
+import numpy as np
+import math
+from haversine import haversine, Unit
+
+
+def haversine(latlong1: tuple, latlong2: tuple):
+    lat1, lon1 = latlong1[0], latlong1[0]
+    lat2, lon2 = latlong2[0], latlong2[0]
+
+    distance = haversine((lat1, lon1), (lat2, lon2), unit=Unit.MILES)
+
+    return distance
+
+
+income = pd.read_csv('new_income.csv')
+employ = pd.read_csv('new_employment.csv')
+population = pd.read_csv('new_population.csv')
+potential = pd.read_csv('new_potential_loc.csv')
+existing = pd.read_csv('new_child_care.csv')
+
+# Only want ages 0-14
+population = population[['zip_code', '-5', '5-9', '10-14']]
+
+population.rename(columns={'-5': '0-5'}, inplace=True)
+
+population['0-12'] = np.floor((3 / 5)*population['10-14'] + population['0-5'] + population['5-9'])
+
+# Combine infant, toddler, and preschool capacity into age 0-5 capacity column (TA's formulas)
+existing['0-5 capacity'] = np.floor(
+    existing['infant_capacity'] + existing['toddler_capacity'] + existing['preschool_capacity'] + (5 / 12) * existing[
+        'children_capacity'])
+existing['5-12 capacity'] = np.floor(7/12 * existing['children_capacity'])
+existing['0-12 capacity'] = existing['0-5 capacity'] + existing['5-12 capacity']
+
+existing = existing[existing['total_capacity'] != 0]
+
+master_zips = sorted(list(income['zip_code']))
+
+master_df = employ
+master_df['income'] = income['average income']
+master_df['0-5 pop'] = population['0-5']
+master_df['0-12 pop'] = population['0-12']
+
+master_df['is_hd'] = np.where((master_df['employment rate'] >= 0.60) & (master_df['income'] <= 60000), 1, 0)
+
+m = Model('model')
+
+master_cost_objective = 0
+master_vars = []
+
+# Iterate through zip codes
+for i in range(len(master_df)):
+
+    row = master_df.iloc[i]
+    zip1 = row['zip_code']
+    # number of small, med, large to build in that zip
+    xs = m.addVar(vtype=GRB.INTEGER, lb=0, name=f'{int(zip1)}_small')
+    xm = m.addVar(vtype=GRB.INTEGER, lb=0, name=f'{int(zip1)}_med')
+    xl = m.addVar(vtype=GRB.INTEGER, lb=0, name=f'{int(zip1)}_large')
+
+    build_cost_exp = (65000 * xs + 95000 * xm + 115000 * xl)
+    expans_cost_exp = 0
+
+    # Dataframe of existing facilities in zip1
+    current = existing[existing['zip_code'] == zip1]
+
+    # If there is atleast one existing facility in that zipcode
+    if len(current['facility_id']) > 0:
+
+        # Get total, 05 capacities for each existing facility
+        total_capacities = list(current['total_capacity'])
+        zerotofive_capacities = list(current['0-5 capacity'])
+
+        expans05 = [m.addVar(vtype=GRB.INTEGER, lb=0, name=f'exp05_{int(zip1)}_{facility["facility_id"]}') for
+                  idx, facility in current.iterrows()]
+        expans512 = [m.addVar(vtype=GRB.INTEGER, lb=0, name=f'exp512_{int(zip1)}_{facility["facility_id"]}') for
+                    idx, facility in current.iterrows()]
+
+        # Expansion cannot result in more than 500 total slots
+        for j in range(len(expans05)):
+            if total_capacities[j] >= 500:
+                m.addConstr(expans05[j] + expans512[j] == 0, name=f'maxslots_{zip1}_{current.iloc[j]["facility_id"]}')
+            else:
+                max_capacity = min(500, 1.2*total_capacities[j])
+                m.addConstr(expans05[j] + expans512[j] + total_capacities[j] <= max_capacity, name=f'maxslots_{zip1}_{current.iloc[j]["facility_id"]}')
+
+        new_totalcapacity_byzip_exp = (xs * 100 + xm * 200 + xl * 400) + quicksum(
+            expans05[i] + expans512[i] for i in range(len(expans05)))
+        new_05capacity_byzip_exp = (xs * 50 + xm * 100 + xl * 200) + quicksum(
+            expans05[i] for i in range(len(expans05)))
+
+        # High/low demand constraints
+        if row['is_hd'] == 1:
+            m.addConstr(new_totalcapacity_byzip_exp >= 0.5 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+
+        else:
+            m.addConstr(new_totalcapacity_byzip_exp >= 0.333 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+
+        for k in range(len(expans05)):
+
+            expans_cost_exp += (20000 + 200 * total_capacities[k]) * ((expans05[k]+expans512[k])/total_capacities[k]) + (100*expans05[k])
+
+    # If there are no facilities in that zipcode
+    else:
+
+        new_totalcapacity_byzip_exp = (xs * 100 + xm * 200 + xl * 400)
+        new_05capacity_byzip_exp = (xs * 50 + xm * 100 + xl * 200)
+
+        # High/low demand constraints
+        if row['is_hd'] == 1:
+            m.addConstr(new_totalcapacity_byzip_exp >= 0.5 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+
+        else:
+            m.addConstr(new_totalcapacity_byzip_exp >= 0.333 * master_df['0-12 pop'].iloc[i], name=f'{zip1}_totaldemand')
+            m.addConstr(new_05capacity_byzip_exp >= 0.666 * master_df['0-5 pop'].iloc[i], name=f'{zip1}_05demand')
+
+    master_cost_objective += build_cost_exp + expans_cost_exp
+
+m.setObjective(master_cost_objective, GRB.MINIMIZE)
+
+m.update()
+m.optimize()
+
