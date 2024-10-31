@@ -52,10 +52,13 @@ master_df['is_hd'] = np.where((master_df['employment rate'] >= 0.60) | (master_d
 m = Model('model')
 
 master_cost_objective = 0
-master_vars = []
+master_vars = {}
+
+# How many rows to run the optimization on (useful for debugging). Master_df is whole thing
+nrows = len(master_df)
 
 # Iterate through zip codes
-for i in range(len(master_df)):
+for i in range(nrows):
 
     row = master_df.iloc[i]
     zip1 = row['zip_code']
@@ -89,6 +92,11 @@ for i in range(len(master_df)):
         small.append(sm)
         med.append(md)
         large.append(lg)
+
+        # Store variables in dictionary to see in output after problem is done
+        master_vars[int(zip1), potential_ids[l], 's'] = sm
+        master_vars[int(zip1), potential_ids[l], 'm'] = md
+        master_vars[int(zip1), potential_ids[l], 'l'] = lg
 
         # Can only build 1 building in a potential location
         m.addConstr(sm + md + lg <= 1, name=f'only1size_{int(zip1)}_{potential_ids[l]}')
@@ -126,10 +134,16 @@ for i in range(len(master_df)):
         total_capacities = list(current['total_capacity'])
         zerotofive_capacities = list(current['0-5 capacity'])
 
+        # Create integer vars for # of 0-5 and 5-12 slots to add to each facility in the current zip code
         expans05 = [m.addVar(vtype=GRB.INTEGER, lb=0, name=f'exp05_{int(zip1)}_{facility["facility_id"]}') for
                     idx, facility in current.iterrows()]
         expans512 = [m.addVar(vtype=GRB.INTEGER, lb=0, name=f'exp512_{int(zip1)}_{facility["facility_id"]}') for
                      idx, facility in current.iterrows()]
+
+        # Store variables in dictionary to see in output after problem is done
+        for i in range(len(expans05)):
+            master_vars[int(zip1), facility_ids[i], '05'] = expans05[i]
+            master_vars[int(zip1), facility_ids[i], '512'] = expans512[i]
 
         # Expansion cannot result in more than 500 total slots at each facility
         for j in range(len(expans05)):
@@ -163,17 +177,17 @@ for i in range(len(master_df)):
             # TA's formula
             exp_rate = (expans05[k] + expans512[k]) / total_capacities[k]
 
-            # Binary variables to do piecewise cost
-            w1 = m.addVar(vtype=GRB.BINARY, name=f'{zip1}_{current["facility_id"].iloc[k]}_exp_<0.10')
-            w2 = m.addVar(vtype=GRB.BINARY, name=f'{zip1}_{current["facility_id"].iloc[k]}_exp_0.10-0.15')
-            w3 = m.addVar(vtype=GRB.BINARY, name=f'{zip1}_{current["facility_id"].iloc[k]}_exp_>0.15')
+            # Binary variables to do piecewise cost, w indicates what bracket the expansion rate is in
+            w1 = m.addVar(vtype=GRB.BINARY, name=f'{zip1}_{facility_ids[k]}_exp_<0.10')
+            w2 = m.addVar(vtype=GRB.BINARY, name=f'{zip1}_{facility_ids[k]}_exp_0.10-0.15')
+            w3 = m.addVar(vtype=GRB.BINARY, name=f'{zip1}_{facility_ids[k]}_exp_>0.15')
 
             # Constraints to implement binary indicators for each range of expansion
-            m.addConstr(w1 + w2 + w3 == 1, name=f'{zip1}_{current["facility_id"].iloc[k]}_mutex')
-            m.addConstr(exp_rate <= 0.1 + M * (1 - w1), name=f'{zip1}_{current["facility_id"].iloc[k]}_aux1')
-            m.addConstr(exp_rate >= 0.1 * w2, name=f'{zip1}_{current["facility_id"].iloc[k]}_aux2')
-            m.addConstr(exp_rate <= 0.15 + M * (1 - w2), name=f'{zip1}_{current["facility_id"].iloc[k]}_aux3')
-            m.addConstr(exp_rate >= 0.15 * w3, name=f'{zip1}_{current["facility_id"].iloc[k]}_aux4')
+            m.addConstr(w1 + w2 + w3 == 1, name=f'{zip1}_{facility_ids[k]}_mutex')
+            m.addConstr(exp_rate <= 0.1 + M * (1 - w1), name=f'{zip1}_{facility_ids[k]}_aux1')
+            m.addConstr(exp_rate >= 0.1 * w2, name=f'{zip1}_{facility_ids[k]}_aux2')
+            m.addConstr(exp_rate <= 0.15 + M * (1 - w2), name=f'{zip1}_{facility_ids[k]}_aux3')
+            m.addConstr(exp_rate >= 0.15 * w3, name=f'{zip1}_{facility_ids[k]}_aux4')
 
             expans_cost_exp += ((20000 + 200 * total_capacities[k]) * exp_rate + (100 * expans05[k])) * w1
             expans_cost_exp += ((20000 + 400 * total_capacities[k]) * exp_rate + (100 * expans05[k])) * w2
@@ -181,7 +195,8 @@ for i in range(len(master_df)):
 
     # If there are no facilities in that zipcode
     else:
-
+        
+        # New total capacity = built capacity only (no facilities to expand)
         new_totalcapacity_byzip_exp = quicksum(
             small[i] * 100 + med[i] * 200 + large[i] * 400 for i in range(len(build_locs)))
         new_05capacity_byzip_exp = quicksum(
@@ -201,19 +216,59 @@ for i in range(len(master_df)):
     master_cost_objective += build_cost_exp + expans_cost_exp
 
 m.setObjective(master_cost_objective, GRB.MINIMIZE)
-
+m.update()
 m.optimize()
 
-# Check if the model is infeasible
-if m.status == GRB.INF_OR_UNBD:
-    print("The model is infeasible; computing the Irreducible Inconsistent Subsystem (IIS):")
-    m.computeIIS()  # Compute the IIS
-    m.write("model.ilp")  # Write the IIS model to a file for inspection
-    print("IIS written to file 'model.ilp'.")
-    # print("The following constraints and/or bounds are causing the infeasibility:")
-    # for c in m.getConstrs():
-    #     if c.IISConstr:
-    #         print(f"{c.constrName} is infeasible.")
-    # for v in m.getVars():
-    #     if v.IISLB > 0 or v.IISUB > 0:
-    #         print(f"Variable bounds on {v.varName} are infeasible.")
+
+# Create output csv to check work
+output = []
+for i in range(nrows):
+    small_buildings = 0
+    med_buildings = 0
+    large_buildings = 0
+
+    zip1 = master_df.iloc[i]['zip_code']
+    current = existing[existing['zip_code'] == zip1]
+    build_locs = potential[potential['zip_code'] == zip1]
+
+    pot_ids = build_locs['potential_id'].tolist()
+
+    for id in pot_ids:
+
+        small_buildings += master_vars[int(zip1), id, 's'].X
+        med_buildings += master_vars[int(zip1), id, 'm'].X
+        large_buildings += master_vars[int(zip1), id, 'l'].X
+
+    existing_ids = current['facility_id'].tolist()
+
+    zerofive_added = 0
+    fivetwelve_added = 0
+    total_existing = 0
+
+    for id in existing_ids:
+        zerofive_added += master_vars[int(zip1), id, '05'].X
+        fivetwelve_added += master_vars[int(zip1), id, '512'].X
+
+    row = {
+        'zip_code': zip1,
+        '0-5_slots_built': 50*small_buildings + 100*med_buildings + 200*large_buildings,
+        'total_slots_built': 100*small_buildings + 200*med_buildings + 400*large_buildings,
+        'small_buildings': small_buildings,
+        'med_buildings': med_buildings,
+        'large_buildings': large_buildings,
+        '05_added': zerofive_added,
+        '512_added': fivetwelve_added,
+        '012_added': zerofive_added + fivetwelve_added,
+        '012_existing': sum(current['total_capacity']),
+        '05_existing': sum(current['0-5 capacity']),
+        'new_total_05': 50*small_buildings + 100*med_buildings + 200*large_buildings + zerofive_added + sum(current['0-5 capacity']),
+        'new_total_012': sum(current['total_capacity']) + zerofive_added + fivetwelve_added + 100*small_buildings + 200*med_buildings + 400*large_buildings,
+        '05_pop': master_df.iloc[i]['0-5 pop'],
+        '012_pop': master_df.iloc[i]['0-12 pop'],
+        'is_hd': master_df.iloc[i]['is_hd']
+    }
+
+    output.append(row)
+
+output_df = pd.DataFrame(output)
+output_df.to_csv('output.csv')
