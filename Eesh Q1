@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import math
 from haversine import haversine, Unit
+import matplotlib.pyplot as plt
 
 
 def haversine(latlong1: tuple, latlong2: tuple):
@@ -46,10 +47,12 @@ master_df['is_hd'] = np.where((master_df['employment rate'] >= 0.60) | (master_d
 m = Model('model')
 
 master_cost_objective = 0
-master_vars = []
+master_vars = {}
+
+nrows = len(master_df)
 
 # Iterate through zip codes
-for i in range(len(master_df)):
+for i in range(nrows):
 
     row = master_df.iloc[i]
     zip1 = row['zip_code']
@@ -57,6 +60,10 @@ for i in range(len(master_df)):
     xs = m.addVar(vtype=GRB.INTEGER, lb=0, name=f'{int(zip1)}_small')
     xm = m.addVar(vtype=GRB.INTEGER, lb=0, name=f'{int(zip1)}_med')
     xl = m.addVar(vtype=GRB.INTEGER, lb=0, name=f'{int(zip1)}_large')
+
+    master_vars[int(zip1), 'small'] = xs
+    master_vars[int(zip1), 'med'] = xm
+    master_vars[int(zip1), 'large'] = xl
 
     build_cost_exp = (65000 * xs + 95000 * xm + 115000 * xl)
     expans_cost_exp = 0
@@ -76,6 +83,11 @@ for i in range(len(master_df)):
                   idx, facility in current.iterrows()]
         expans512 = [m.addVar(vtype=GRB.INTEGER, lb=0, name=f'exp512_{int(zip1)}_{facility["facility_id"]}') for
                     idx, facility in current.iterrows()]
+
+        # Store variables in dictionary to see in output after problem is done
+        for i in range(len(expans05)):
+            master_vars[int(zip1), facility_ids[i], '05'] = expans05[i]
+            master_vars[int(zip1), facility_ids[i], '512'] = expans512[i]
 
         # Expansion cannot result in more than 500 total slots at each facility
         for j in range(len(expans05)):
@@ -126,4 +138,85 @@ m.setObjective(master_cost_objective, GRB.MINIMIZE)
 m.update()
 m.optimize()
 
-opt_vars = [v for v in m.getVars()]
+# Create output csv to check work
+output = []
+for i in range(nrows):
+    small_buildings = 0
+    med_buildings = 0
+    large_buildings = 0
+
+    zip1 = master_df.iloc[i]['zip_code']
+    current = existing[existing['zip_code'] == zip1]
+
+    small_buildings += master_vars[int(zip1), 'small'].X
+    med_buildings += master_vars[int(zip1), 'med'].X
+    large_buildings += master_vars[int(zip1), 'large'].X
+
+    existing_ids = current['facility_id'].tolist()
+
+    zerofive_added = 0
+    fivetwelve_added = 0
+    total_existing = 0
+
+    for id in existing_ids:
+        zerofive_added += master_vars[int(zip1), id, '05'].X
+        fivetwelve_added += master_vars[int(zip1), id, '512'].X
+
+    row = {
+        'zip_code': zip1,
+        '0-5_slots_built': 50*small_buildings + 100*med_buildings + 200*large_buildings,
+        'total_slots_built': 100*small_buildings + 200*med_buildings + 400*large_buildings,
+        'small_buildings': small_buildings,
+        'med_buildings': med_buildings,
+        'large_buildings': large_buildings,
+        '05_added': zerofive_added,
+        '512_added': fivetwelve_added,
+        '012_added': zerofive_added + fivetwelve_added,
+        '012_existing': sum(current['total_capacity']),
+        '05_existing': sum(current['0-5 capacity']),
+        'new_total_05': 50*small_buildings + 100*med_buildings + 200*large_buildings + zerofive_added + sum(current['0-5 capacity']),
+        'new_total_012': sum(current['total_capacity']) + zerofive_added + fivetwelve_added + 100*small_buildings + 200*med_buildings + 400*large_buildings,
+        '05_pop': master_df.iloc[i]['0-5 pop'],
+        '012_pop': master_df.iloc[i]['0-12 pop'],
+        'is_hd': master_df.iloc[i]['is_hd']
+    }
+
+    output.append(row)
+
+output_df = pd.DataFrame(output)
+output_df.to_csv('Q1output.csv')
+
+# df = pd.read_csv('Q1output.csv')
+
+# df['Group'] = df.index // 11
+
+# Group by the 'Group' column and sum the values
+# df = df.groupby('Group').sum().reset_index()
+
+
+# plt.scatter(df['05_added'], df['512_added'])
+# plt.xlabel('# of 0-5 slots added')
+# plt.ylabel('# of 5-12 slots added')
+# plt.title('Expansion In Groups of 11 Zip Codes')
+# plt.grid()
+# plt.show()
+
+
+# fig, ax = plt.subplots()
+# # Set the positions for the bars
+# bar_width = 0.25
+# index = np.arange(len(df['Group']))  # The x positions for the groups
+#
+# # Plot each value as a bar
+# ax.bar(index - bar_width, df['small_buildings'], bar_width, label='Small')
+# ax.bar(index, df['med_buildings'], bar_width, label='Medium')
+# ax.bar(index + bar_width, df['large_buildings'], bar_width, label='Large', alpha=0.5)
+#
+# # Set labels, title, and custom x-ticks
+# ax.set_xlabel('Zip Code Group')
+# ax.set_ylabel('# Buildings')
+# ax.set_title('New Facilities Size Breakdown')
+# ax.legend()
+#
+# # Display the plot
+# plt.show()
